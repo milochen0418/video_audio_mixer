@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "video-audio-mixer"
+version = "0.1.0"
+description = "Video Audio Remixer – a Reflex-based web app for mixing video and audio"
+authors = []
+readme = "README.md"
+packages = [{include = "video_audio_mixer"}]
+
+[tool.poetry.dependencies]
+python = "~3.11"
+reflex = "0.8.26"
+pydub = "*"
+audioop-lts = {version = "*", python = ">=3.13"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+playwright = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
