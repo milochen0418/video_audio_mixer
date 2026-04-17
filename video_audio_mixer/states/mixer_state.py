@@ -35,8 +35,10 @@ class MixerState(rx.State):
     video_size: str = ""
     audio_tracks: list[dict[str, str | float | bool]] = []
     volume_segments: list[dict[str, float]] = []
+    selected_track_id: str = ""
     is_uploading: bool = False
     is_exporting: bool = False
+    is_previewing: bool = False
     export_progress: float = 0.0
     export_error: str = ""
     exported_file: str = ""
@@ -109,9 +111,46 @@ class MixerState(rx.State):
         finally:
             self.is_uploading = False
 
+    @rx.var
+    def preview_data_json(self) -> str:
+        return json.dumps({
+            "tracks": self.audio_tracks,
+            "segments": self.volume_segments,
+            "duration": self.video_duration,
+        })
+
+    @rx.event
+    def preview_mix(self):
+        if not self.video_file:
+            return
+        self.is_previewing = True
+
+    @rx.event
+    def stop_preview(self):
+        self.is_previewing = False
+
+    @rx.event
+    def select_track(self, track_id: str):
+        if self.selected_track_id == track_id:
+            self.selected_track_id = ""
+        else:
+            self.selected_track_id = track_id
+
     @rx.event
     def remove_audio_track(self, track_id: str):
         self.audio_tracks = [t for t in self.audio_tracks if t["id"] != track_id]
+        if self.selected_track_id == track_id:
+            self.selected_track_id = ""
+
+    @rx.event
+    def duplicate_track(self, track_id: str):
+        for track in self.audio_tracks:
+            if track["id"] == track_id:
+                new_id = f"trk_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
+                new_track = dict(track)
+                new_track["id"] = new_id
+                self.audio_tracks.append(new_track)
+                break
 
     @rx.event
     def add_volume_segment(self, time: float):
@@ -169,6 +208,26 @@ class MixerState(rx.State):
                 trim_end = min(track["duration"], float(trim_end))
                 if trim_start < trim_end:
                     track["trim_start"] = trim_start
+                    track["trim_end"] = trim_end
+                break
+
+    @rx.event
+    def update_track_trim_start(self, track_id: str, trim_start: float):
+        for track in self.audio_tracks:
+            if track["id"] == track_id:
+                trim_start = max(0.0, float(trim_start))
+                trim_end = track.get("trim_end", track["duration"])
+                if trim_start < trim_end:
+                    track["trim_start"] = trim_start
+                break
+
+    @rx.event
+    def update_track_trim_end(self, track_id: str, trim_end: float):
+        for track in self.audio_tracks:
+            if track["id"] == track_id:
+                trim_end = min(track["duration"], float(trim_end))
+                trim_start = track.get("trim_start", 0.0)
+                if trim_start < trim_end:
                     track["trim_end"] = trim_end
                 break
 

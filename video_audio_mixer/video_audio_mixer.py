@@ -29,6 +29,7 @@ app = rx.App(
             href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
             rel="stylesheet",
         ),
+        rx.el.script(src="/preview.js"),
     ],
 )
 app.add_page(index, route="/")
