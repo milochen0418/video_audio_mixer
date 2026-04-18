@@ -128,6 +128,52 @@ def _labeled_number_input(
     )
 
 
+def _keyframe_row_selected(kf: dict, index: int) -> rx.Component:
+    """A single row for editing a volume keyframe of the selected track."""
+    return rx.el.div(
+        rx.el.span(
+            "#" + (index + 1).to(str),
+            class_name="text-[10px] text-neutral-500 w-5 shrink-0",
+        ),
+        rx.el.input(
+            type="number",
+            value=kf["time"],
+            min=0,
+            step=0.1,
+            on_change=lambda v: MixerState.update_volume_keyframe(
+                MixerState.selected_track_id, index, v, kf["volume"]
+            ),
+            class_name="w-16 bg-neutral-900 border border-neutral-700 rounded px-1.5 py-0.5 text-[11px] text-neutral-200 focus:outline-none focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none",
+            title="Time (seconds)",
+        ),
+        rx.el.span("s", class_name="text-[10px] text-neutral-500"),
+        rx.el.input(
+            type="range",
+            min="0",
+            max="2",
+            step="0.01",
+            value=kf["volume"],
+            on_change=lambda v: MixerState.update_volume_keyframe(
+                MixerState.selected_track_id, index, kf["time"], v
+            ),
+            class_name="flex-1 h-1 accent-emerald-500 cursor-pointer",
+        ),
+        rx.el.span(
+            kf["volume"].to(str) + "x",
+            class_name="text-[10px] text-neutral-300 w-8 text-right tabular-nums",
+        ),
+        rx.el.button(
+            rx.icon("x", class_name="w-3 h-3"),
+            on_click=lambda: MixerState.remove_volume_keyframe(
+                MixerState.selected_track_id, index
+            ),
+            class_name="p-0.5 rounded text-neutral-500 hover:text-red-400 hover:bg-neutral-700 transition-colors shrink-0",
+            title="Remove keyframe",
+        ),
+        class_name="flex items-center gap-1.5 bg-neutral-800/50 rounded px-1.5 py-1 border border-neutral-700/50",
+    )
+
+
 def audio_track_item(track: dict) -> rx.Component:
     is_selected = MixerState.selected_track_id == track["id"]
     is_muted = track.get("muted", False)
@@ -232,6 +278,31 @@ def audio_track_item(track: dict) -> rx.Component:
                             class_name="text-xs text-neutral-300 w-10 text-right tabular-nums",
                         ),
                         class_name="flex items-center gap-2",
+                    ),
+                    class_name="flex flex-col gap-1",
+                ),
+                # Volume Envelope (keyframes)
+                rx.el.div(
+                    rx.el.div(
+                        rx.el.label(
+                            "Volume Envelope",
+                            class_name="text-[10px] text-neutral-500 uppercase tracking-wider",
+                        ),
+                        rx.el.button(
+                            rx.icon("plus", class_name="w-3 h-3 mr-0.5"),
+                            "Add",
+                            on_click=lambda: MixerState.add_volume_keyframe(
+                                track["id"],
+                                track.get("trim_end", track["duration"]),
+                                1.0,
+                            ),
+                            class_name="flex items-center text-[10px] font-medium text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 px-1.5 py-0.5 rounded border border-indigo-500/30 transition-colors",
+                        ),
+                        class_name="flex items-center justify-between mb-1",
+                    ),
+                    rx.foreach(
+                        MixerState.selected_track_keyframes,
+                        lambda kf, idx: _keyframe_row_selected(kf, idx),
                     ),
                     class_name="flex flex-col gap-1",
                 ),
