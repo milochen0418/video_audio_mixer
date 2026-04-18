@@ -33,7 +33,7 @@ class MixerState(rx.State):
     video_filename: str = ""
     video_duration: float = 0.0
     video_size: str = ""
-    audio_tracks: list[dict[str, str | float | bool]] = []
+    audio_tracks: list[dict[str, Any]] = []
     volume_segments: list[dict[str, float]] = []
     selected_track_id: str = ""
     is_uploading: bool = False
@@ -104,6 +104,9 @@ class MixerState(rx.State):
                         "duration": duration,
                         "muted": False,
                         "solo": False,
+                        "volume_keyframes": [
+                            {"time": 0.0, "volume": 1.0},
+                        ],
                     }
                 )
         except Exception as e:
@@ -118,6 +121,40 @@ class MixerState(rx.State):
             "segments": self.volume_segments,
             "duration": self.video_duration,
         })
+
+    @rx.var
+    def time_markers(self) -> list[dict[str, str | float]]:
+        """Generate time ruler markers for the timeline."""
+        if self.video_duration <= 0:
+            return []
+        # Choose interval based on duration
+        dur = self.video_duration
+        if dur <= 30:
+            interval = 5
+        elif dur <= 120:
+            interval = 15
+        elif dur <= 300:
+            interval = 30
+        else:
+            interval = 60
+        markers = []
+        t = 0.0
+        while t <= dur:
+            mins = int(t) // 60
+            secs = int(t) % 60
+            label = f"{mins:02d}:{secs:02d}"
+            pct = (t / dur) * 100 if dur > 0 else 0
+            markers.append({"label": label, "pct": pct, "time": t})
+            t += interval
+        return markers
+
+    @rx.var
+    def selected_track_keyframes(self) -> list[dict[str, float]]:
+        """Return keyframes for the currently selected track."""
+        for track in self.audio_tracks:
+            if track["id"] == self.selected_track_id:
+                return track.get("volume_keyframes", [])
+        return []
 
     @rx.event
     def preview_mix(self):
@@ -252,6 +289,50 @@ class MixerState(rx.State):
                 track["solo"] = not track.get("solo", False)
                 break
 
+    # ── Volume Envelope (per-track keyframes) ──
+
+    @rx.event
+    def add_volume_keyframe(self, track_id: str, time: float, volume: float):
+        """Add a keyframe to a track's volume envelope."""
+        for track in self.audio_tracks:
+            if track["id"] == track_id:
+                kfs = list(track.get("volume_keyframes", []))
+                time = round(float(time), 2)
+                volume = max(0.0, min(2.0, float(volume)))
+                # Replace if same time exists
+                kfs = [k for k in kfs if abs(k["time"] - time) > 0.01]
+                kfs.append({"time": time, "volume": volume})
+                kfs.sort(key=lambda k: k["time"])
+                track["volume_keyframes"] = kfs
+                break
+
+    @rx.event
+    def remove_volume_keyframe(self, track_id: str, index: int):
+        """Remove a keyframe by index from a track's volume envelope."""
+        for track in self.audio_tracks:
+            if track["id"] == track_id:
+                kfs = list(track.get("volume_keyframes", []))
+                if 0 <= int(index) < len(kfs):
+                    kfs.pop(int(index))
+                    track["volume_keyframes"] = kfs
+                break
+
+    @rx.event
+    def update_volume_keyframe(self, track_id: str, index: int, time: float, volume: float):
+        """Update an existing keyframe's time and volume."""
+        for track in self.audio_tracks:
+            if track["id"] == track_id:
+                kfs = list(track.get("volume_keyframes", []))
+                idx = int(index)
+                if 0 <= idx < len(kfs):
+                    kfs[idx] = {
+                        "time": round(float(time), 2),
+                        "volume": max(0.0, min(2.0, float(volume))),
+                    }
+                    kfs.sort(key=lambda k: k["time"])
+                    track["volume_keyframes"] = kfs
+                break
+
     @rx.event(background=True)
     async def export_video(self):
         async with self:
@@ -308,8 +389,49 @@ class MixerState(rx.State):
                     trim_end = t.get("trim_end", t.get("duration", 0.0))
                     vol = t.get("volume", 1.0)
                     delay_ms = int(t.get("start_time", 0.0) * 1000)
+                    keyframes = t.get("volume_keyframes", [])
                     track_filter = f"[{idx}:a]atrim=start={trim_start}:end={trim_end},asetpts=PTS-STARTPTS"
-                    if vol != 1.0:
+                    # Build volume filters from keyframes (linear interpolation)
+                    if keyframes and len(keyframes) >= 2:
+                        vol_parts = []
+                        for ki in range(len(keyframes) - 1):
+                            k0 = keyframes[ki]
+                            k1 = keyframes[ki + 1]
+                            t0, v0 = float(k0["time"]), float(k0["volume"])
+                            t1, v1 = float(k1["time"]), float(k1["volume"])
+                            if abs(v0 - v1) < 0.001:
+                                # Constant volume segment
+                                if abs(v0 - 1.0) > 0.001:
+                                    vol_parts.append(
+                                        f"volume={v0}:enable='between(t,{t0},{t1})'"
+                                    )
+                            else:
+                                # Linear ramp: volume changes from v0 to v1
+                                dur = t1 - t0
+                                if dur > 0:
+                                    # Use volume expression for linear interpolation
+                                    vol_parts.append(
+                                        f"volume='{v0}+({v1}-{v0})*(t-{t0})/({t1}-{t0})':eval=frame:enable='between(t,{t0},{t1})'"
+                                    )
+                        # Handle volume after the last keyframe
+                        last_kf = keyframes[-1]
+                        last_vol = float(last_kf["volume"])
+                        last_time = float(last_kf["time"])
+                        if abs(last_vol - 1.0) > 0.001:
+                            vol_parts.append(
+                                f"volume={last_vol}:enable='gte(t,{last_time})'"
+                            )
+                        # Handle volume before the first keyframe
+                        first_kf = keyframes[0]
+                        first_vol = float(first_kf["volume"])
+                        first_time = float(first_kf["time"])
+                        if first_time > 0 and abs(first_vol - 1.0) > 0.001:
+                            vol_parts.append(
+                                f"volume={first_vol}:enable='lt(t,{first_time})'"
+                            )
+                        if vol_parts:
+                            track_filter += "," + ",".join(vol_parts)
+                    elif vol != 1.0:
                         track_filter += f",volume={vol}"
                     if delay_ms > 0:
                         track_filter += f",adelay={delay_ms}|{delay_ms}"
