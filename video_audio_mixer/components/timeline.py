@@ -81,7 +81,7 @@ def timeline() -> rx.Component:
                     ),
                     # Audio tracks
                     rx.foreach(
-                        MixerState.audio_tracks,
+                        MixerState.audio_tracks_with_envelope,
                         lambda track: rx.el.div(
                             rx.el.div(
                                 rx.el.span(track["filename"], class_name="truncate w-20"),
@@ -120,14 +120,23 @@ def timeline() -> rx.Component:
                             ),
                             rx.el.div(
                                 rx.el.div(
+                                    # Volume envelope visualization via CSS background-image
+                                    rx.el.div(
+                                        class_name="absolute inset-0",
+                                        style={
+                                            "background_image": track["env_bg_image"],
+                                            "background_size": "100% 100%",
+                                            "background_repeat": "no-repeat",
+                                        },
+                                    ),
                                     rx.el.span(
                                         track["volume"].to(str) + "x",
-                                        class_name="text-[10px] text-white/60 px-1 select-none",
+                                        class_name="text-[10px] text-white/60 px-1 select-none relative z-10",
                                     ),
                                     class_name=rx.cond(
                                         track.get("muted", False),
-                                        "h-full bg-neutral-700/40 border border-neutral-600 rounded absolute flex items-center",
-                                        "h-full bg-emerald-900/40 border border-emerald-700 rounded absolute flex items-center",
+                                        "h-full bg-neutral-700/40 border border-neutral-600 rounded absolute flex items-center overflow-hidden",
+                                        "h-full bg-emerald-900/40 border border-emerald-700 rounded absolute flex items-center overflow-hidden",
                                     ),
                                     style=rx.cond(
                                         MixerState.video_duration > 0,
@@ -140,7 +149,7 @@ def timeline() -> rx.Component:
                                 ),
                                 class_name="flex-1 relative p-1",
                             ),
-                            class_name="flex h-12 bg-neutral-900 border border-neutral-800 rounded-md overflow-hidden mb-2",
+                            class_name="flex h-16 bg-neutral-900 border border-neutral-800 rounded-md overflow-hidden mb-2",
                         ),
                     ),
                     # ── Playhead (vertical line spanning all tracks) ──

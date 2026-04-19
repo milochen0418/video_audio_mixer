@@ -4,6 +4,7 @@ import json
 import random
 import string
 import logging
+import urllib.parse
 from typing import Any
 
 
@@ -26,6 +27,23 @@ def get_media_duration(file_path: str) -> float:
     except Exception as e:
         logging.exception(f"Error getting duration: {e}")
         return 0.0
+
+
+def _interpolate_envelope(kfs: list, t: float) -> float:
+    """Linearly interpolate volume envelope from keyframes at time t."""
+    if not kfs:
+        return 1.0
+    if t <= kfs[0]["time"]:
+        return max(0.0, kfs[0]["volume"])
+    if t >= kfs[-1]["time"]:
+        return max(0.0, kfs[-1]["volume"])
+    for j in range(len(kfs) - 1):
+        k0, k1 = kfs[j], kfs[j + 1]
+        if k0["time"] <= t <= k1["time"]:
+            span = k1["time"] - k0["time"]
+            frac = (t - k0["time"]) / span if span > 0 else 0
+            return max(0.0, k0["volume"] + frac * (k1["volume"] - k0["volume"]))
+    return 1.0
 
 
 class MixerState(rx.State):
@@ -155,6 +173,59 @@ class MixerState(rx.State):
             if track["id"] == self.selected_track_id:
                 return track.get("volume_keyframes", [])
         return []
+
+    @rx.var
+    def audio_tracks_with_envelope(self) -> list[dict[str, Any]]:
+        """Audio tracks enriched with SVG envelope visualization for timeline."""
+        result = []
+        for track in self.audio_tracks:
+            enriched = dict(track)
+            kfs = track.get("volume_keyframes", [])
+            base_vol = float(track.get("volume", 1.0))
+            trim_start = float(track.get("trim_start", 0.0))
+            trim_end = float(track.get("trim_end", track.get("duration", 0.0)))
+            dur = trim_end - trim_start
+            if dur <= 0:
+                enriched["env_bg_image"] = "none"
+                result.append(enriched)
+                continue
+
+            # Sample at keyframe times + regular intervals for smooth curves
+            sample_count = 80
+            regular = [trim_start + (i / sample_count) * dur for i in range(sample_count + 1)]
+            kf_times = [float(kf["time"]) for kf in kfs if trim_start <= float(kf["time"]) <= trim_end]
+            times = sorted(set(regular + kf_times))
+
+            eff_pts = []
+            env_pts = []
+            for t in times:
+                x = ((t - trim_start) / dur) * 100
+                env = _interpolate_envelope(kfs, t)
+                eff = min(1.0, max(0.0, base_vol * env))
+                eff_y = 100 - eff * 100
+                eff_pts.append(f"{x:.1f},{eff_y:.1f}")
+                env_disp = min(1.0, max(0.0, env))
+                env_y = 100 - env_disp * 100
+                env_pts.append(f"{x:.1f},{env_y:.1f}")
+
+            x0 = ((times[0] - trim_start) / dur) * 100
+            xn = ((times[-1] - trim_start) / dur) * 100
+            fill_poly = f"{x0:.1f},100 " + " ".join(eff_pts) + f" {xn:.1f},100"
+            eff_line = " ".join(eff_pts)
+            env_line = " ".join(env_pts)
+
+            svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="none">'
+                f'<polygon points="{fill_poly}" fill="rgba(16,185,129,0.3)"/>'
+                f'<polyline points="{eff_line}" fill="none" stroke="rgba(16,185,129,0.9)" '
+                'stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
+                f'<polyline points="{env_line}" fill="none" stroke="rgba(251,191,36,0.7)" '
+                'stroke-width="1.5" stroke-dasharray="4,3" vector-effect="non-scaling-stroke"/>'
+                '</svg>'
+            )
+            enriched["env_bg_image"] = f"url(\"data:image/svg+xml,{urllib.parse.quote(svg)}\")"
+            result.append(enriched)
+        return result
 
     @rx.event
     def preview_mix(self):
