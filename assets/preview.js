@@ -83,8 +83,10 @@ window._previewSyncInterval = null;
     video.addEventListener("loadedmetadata", updatePlayhead);
   }
 
-  // Click on timeline tracks area → seek video
+  // Click on timeline tracks area → seek video (and audio if previewing)
+  // (Only fires from Reflex on_click — ignored during/after a drag)
   window._timelineClick = function(e) {
+    if (window._suppressTimelineClick) return;
     var pct = pctFromEvent(e);
     if (pct < 0) return;
     var dur = getVideoDuration();
@@ -95,14 +97,42 @@ window._previewSyncInterval = null;
       video.currentTime = seekTime;
       attachVideoListener();
       updatePlayhead();
+      // If preview is active, reposition all audio tracks
+      if (window._previewActive) {
+        window._seekPreviewAudioToTime(seekTime);
+      }
     }
   };
 
-  // Drag support on the playhead
+  // Drag support — use document-level delegation so listeners survive Reflex re-renders
+  function isInsideTimeline(el) {
+    while (el) {
+      if (el.id === "timeline-tracks" || el.id === "timeline-ruler") return true;
+      el = el.parentElement;
+    }
+    return false;
+  }
+
   function onMouseDown(e) {
-    if (pctFromEvent(e) < 0) return;
+    if (!isInsideTimeline(e.target)) return;
+    var pct = pctFromEvent(e);
+    if (pct < 0) pct = pctFromRulerEvent(e);
+    if (pct < 0) return;
     _dragging = true;
     e.preventDefault();
+    // Immediately seek to click position
+    var dur = getVideoDuration();
+    if (dur > 0) {
+      var video = document.querySelector("video");
+      if (video) {
+        video.currentTime = pct * dur;
+        attachVideoListener();
+        updatePlayhead();
+        if (window._previewActive) {
+          window._seekPreviewAudioToTime(pct * dur);
+        }
+      }
+    }
   }
   function onMouseMove(e) {
     if (!_dragging) return;
@@ -116,22 +146,24 @@ window._previewSyncInterval = null;
     if (video) {
       video.currentTime = pct * dur;
       updatePlayhead();
+      // If preview is active, reposition all audio tracks
+      if (window._previewActive) {
+        window._seekPreviewAudioToTime(pct * dur);
+      }
     }
   }
   function onMouseUp() {
-    _dragging = false;
+    if (_dragging) {
+      _dragging = false;
+      // Suppress the upcoming React click event after a drag to avoid double-seek
+      window._suppressTimelineClick = true;
+      setTimeout(function () { window._suppressTimelineClick = false; }, 50);
+    }
   }
 
-  // Attach drag listeners after DOM is ready
+  // Attach all listeners at the document level (survives Reflex re-renders)
   function setup() {
-    var container = document.getElementById("timeline-tracks");
-    if (container) {
-      container.addEventListener("mousedown", onMouseDown);
-    }
-    var ruler = document.getElementById("timeline-ruler");
-    if (ruler) {
-      ruler.addEventListener("mousedown", onMouseDown);
-    }
+    document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
     attachVideoListener();
@@ -226,6 +258,68 @@ window._syncPreviewState = function () {
     }
     video.volume = vol;
   }
+};
+
+// ── Seek all preview audio tracks to match a new video time ──
+window._seekPreviewAudioToTime = function (videoTime) {
+  if (!window._previewActive) return;
+
+  // Cancel any pending delayed-start timers
+  window._previewTimers.forEach(function (t) { clearTimeout(t); });
+  window._previewTimers = [];
+
+  var data = window._readPreviewData();
+  var tracks = (data && data.tracks) || [];
+  var hasSolo = tracks.some(function (t) { return t.solo; });
+
+  Object.keys(window._audioTrackMap).forEach(function (trackId) {
+    var entry = window._audioTrackMap[trackId];
+    if (!entry) return;
+    var audio = entry.audio;
+    var track = entry.trackData;
+
+    var trimStart = track.trim_start || 0;
+    var trimEnd = track.trim_end || track.duration || 9999;
+    var startTime = track.start_time || 0;
+    var trackEnd = startTime + (trimEnd - trimStart);
+
+    var shouldPlay = hasSolo ? track.solo : !track.muted;
+
+    if (videoTime >= trackEnd || videoTime < 0) {
+      // Past this track's range — pause it
+      audio.pause();
+      return;
+    }
+
+    if (videoTime >= startTime) {
+      // Within the track's active range
+      var audioOffset = trimStart + (videoTime - startTime);
+      audio.currentTime = Math.min(audioOffset, trimEnd);
+      audio.volume = shouldPlay
+        ? _computeVolume(track.volume, track.volume_keyframes || [], audio.currentTime)
+        : 0;
+      if (audio.paused) {
+        audio.play().catch(function (e) {
+          console.warn("[Preview] Seek play error:", e.message);
+        });
+      }
+    } else {
+      // Before the track's start — pause and schedule delayed play
+      audio.pause();
+      audio.currentTime = trimStart;
+      audio.volume = shouldPlay
+        ? _computeVolume(track.volume, track.volume_keyframes || [], trimStart)
+        : 0;
+      var delayMs = (startTime - videoTime) * 1000;
+      var timer = setTimeout(function () {
+        if (!window._previewActive) return;
+        audio.play().catch(function (e) {
+          console.warn("[Preview] Delayed seek play error:", e.message);
+        });
+      }, delayMs);
+      window._previewTimers.push(timer);
+    }
+  });
 };
 
 // Entry point called directly from button click (preserves user gesture)
