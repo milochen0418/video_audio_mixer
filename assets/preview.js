@@ -3,6 +3,9 @@ window._previewActive = false;
 window._audioElements = [];
 window._previewTimers = [];
 window._videoVolumeHandler = null;
+// Track-ID → { audio, trackData } for real-time updates
+window._audioTrackMap = {};
+window._previewSyncInterval = null;
 
 // ── Timeline Playhead ──
 (function initPlayhead() {
@@ -146,26 +149,93 @@ window._videoVolumeHandler = null;
   }
 })();
 
+// ── Helper: read latest preview data from DOM ──
+window._readPreviewData = function () {
+  var el = document.getElementById("preview-data");
+  if (!el) return null;
+  var raw = (el.textContent || el.innerText || "").trim();
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+};
+
+// ── Helper: interpolate envelope multiplier from keyframes ──
+// Returns a 0-1 multiplier from the envelope. The base volume slider is applied separately.
+function _envelopeMultiplier(keyframes, t) {
+  if (!keyframes || keyframes.length === 0) return 1.0;
+  if (t <= keyframes[0].time) return Math.max(0, keyframes[0].volume);
+  if (t >= keyframes[keyframes.length - 1].time) return Math.max(0, keyframes[keyframes.length - 1].volume);
+  for (var j = 0; j < keyframes.length - 1; j++) {
+    var k0 = keyframes[j], k1 = keyframes[j + 1];
+    if (t >= k0.time && t <= k1.time) {
+      var frac = (k1.time === k0.time) ? 0 : (t - k0.time) / (k1.time - k0.time);
+      return Math.max(0, k0.volume + frac * (k1.volume - k0.volume));
+    }
+  }
+  return 1.0;
+}
+
+// Compute final volume: baseVolume × envelopeMultiplier, clamped to [0, 1]
+function _computeVolume(baseVolume, keyframes, audioTime) {
+  var envelope = _envelopeMultiplier(keyframes, audioTime);
+  return Math.min(1.0, Math.max(0, (baseVolume || 1.0) * envelope));
+}
+
+// ── Real-time sync: apply latest track settings to playing audio ──
+window._syncPreviewState = function () {
+  if (!window._previewActive) return;
+  var data = window._readPreviewData();
+  if (!data) return;
+
+  var tracks = data.tracks || [];
+  var hasSolo = tracks.some(function (t) { return t.solo; });
+
+  tracks.forEach(function (track) {
+    var entry = window._audioTrackMap[track.id];
+    if (!entry) return;
+
+    var audio = entry.audio;
+    var shouldPlay = hasSolo ? track.solo : !track.muted;
+
+    // Update stored track data for keyframe interpolation
+    entry.trackData = track;
+
+    if (!shouldPlay) {
+      // Muted or not-soloed → silence
+      if (!audio.paused) {
+        audio.volume = 0;
+      }
+      entry.silenced = true;
+    } else {
+      entry.silenced = false;
+      // Final volume = base slider × envelope keyframe multiplier
+      var kfs = track.volume_keyframes || [];
+      audio.volume = _computeVolume(track.volume, kfs, audio.currentTime);
+    }
+  });
+
+  // Also update video volume segments
+  var video = document.querySelector("video");
+  if (video && data.segments) {
+    var t = video.currentTime;
+    var vol = 1.0;
+    for (var i = 0; i < data.segments.length; i++) {
+      if (t >= data.segments[i].start && t < data.segments[i].end) {
+        vol = Math.min(1.0, data.segments[i].volume);
+        break;
+      }
+    }
+    video.volume = vol;
+  }
+};
+
 // Entry point called directly from button click (preserves user gesture)
 window.startPreviewFromDOM = function () {
-  var el = document.getElementById("preview-data");
-  if (!el) {
-    console.error("[Preview] No #preview-data element found");
+  var data = window._readPreviewData();
+  if (!data) {
+    console.error("[Preview] No preview data available");
     return;
   }
-  var raw = el.textContent || el.innerText || "";
-  raw = raw.trim();
-  if (!raw) {
-    console.error("[Preview] #preview-data is empty");
-    return;
-  }
-  try {
-    var data = JSON.parse(raw);
-    console.log("[Preview] Parsed data, tracks:", data.tracks.length);
-  } catch (e) {
-    console.error("[Preview] JSON parse failed:", e, "raw:", raw.substring(0, 100));
-    return;
-  }
+  console.log("[Preview] Parsed data, tracks:", data.tracks.length);
 
   // Stop any previous preview
   window.stopPreview();
@@ -182,24 +252,6 @@ window.startPreviewFromDOM = function () {
   var videoStartTime = video.currentTime || 0;
   console.log("[Preview] Starting from time:", videoStartTime);
   video.muted = false;
-
-  var segments = data.segments || [];
-
-  // Volume segments for original video audio
-  function updateVideoVolume() {
-    if (!window._previewActive) return;
-    var t = video.currentTime;
-    var vol = 1.0;
-    for (var i = 0; i < segments.length; i++) {
-      if (t >= segments[i].start && t < segments[i].end) {
-        vol = Math.min(1.0, segments[i].volume);
-        break;
-      }
-    }
-    video.volume = vol;
-  }
-  video.addEventListener("timeupdate", updateVideoVolume);
-  window._videoVolumeHandler = updateVideoVolume;
 
   video.addEventListener("ended", function () {
     console.log("[Preview] Video ended");
@@ -218,7 +270,6 @@ window.startPreviewFromDOM = function () {
   var hasSolo = tracks.some(function (t) { return t.solo; });
 
   // Derive the upload base URL from the video element's src
-  // Video src is something like "http://localhost:8000/_upload/filename"
   var videoSrc = video.src || "";
   var uploadBase = "/_upload/";
   var uploadIdx = videoSrc.indexOf("/_upload/");
@@ -227,68 +278,55 @@ window.startPreviewFromDOM = function () {
   }
   console.log("[Preview] Upload base URL:", uploadBase);
 
+  // Create audio elements for ALL tracks (even muted) so we can unmute live
   tracks.forEach(function (track) {
-    var shouldPlay = hasSolo ? track.solo : !track.muted;
-    if (!shouldPlay) return;
-
-      var audioUrl = uploadBase + encodeURIComponent(track.path);
+    var audioUrl = uploadBase + encodeURIComponent(track.path);
     console.log("[Preview] Creating audio:", track.filename, "->", audioUrl);
 
     var audio = new Audio(audioUrl);
-    audio.volume = Math.min(1.0, Math.max(0, track.volume || 1.0));
+    var shouldPlay = hasSolo ? track.solo : !track.muted;
+    audio.volume = shouldPlay ? _computeVolume(track.volume, track.volume_keyframes || [], 0) : 0;
     window._audioElements.push(audio);
+
+    // Store in track map for real-time sync
+    window._audioTrackMap[track.id] = {
+      audio: audio,
+      trackData: track,
+      silenced: !shouldPlay,
+    };
 
     var trimStart = track.trim_start || 0;
     var trimEnd = track.trim_end || track.duration || 9999;
     var startTime = track.start_time || 0;
-    var keyframes = track.volume_keyframes || [];
 
-    // Interpolate volume from keyframes at a given audio time
-    function interpVolume(t) {
-      if (keyframes.length === 0) return Math.min(1.0, Math.max(0, track.volume || 1.0));
-      if (t <= keyframes[0].time) return Math.min(1.0, keyframes[0].volume);
-      if (t >= keyframes[keyframes.length - 1].time) return Math.min(1.0, keyframes[keyframes.length - 1].volume);
-      for (var j = 0; j < keyframes.length - 1; j++) {
-        var k0 = keyframes[j], k1 = keyframes[j + 1];
-        if (t >= k0.time && t <= k1.time) {
-          var frac = (k1.time === k0.time) ? 0 : (t - k0.time) / (k1.time - k0.time);
-          var vol = k0.volume + frac * (k1.volume - k0.volume);
-          return Math.min(1.0, Math.max(0, vol));
-        }
-      }
-      return Math.min(1.0, Math.max(0, track.volume || 1.0));
-    }
-
-    // Update volume based on keyframes during playback
+    // Stop playback at trim end
     audio.addEventListener("timeupdate", function () {
       if (audio.currentTime >= trimEnd) {
         audio.pause();
         return;
       }
-      audio.volume = interpVolume(audio.currentTime);
+      // Apply real-time volume: base slider × envelope
+      var entry = window._audioTrackMap[track.id];
+      if (entry && !entry.silenced) {
+        var kfs = entry.trackData.volume_keyframes || [];
+        audio.volume = _computeVolume(entry.trackData.volume, kfs, audio.currentTime);
+      }
     });
 
-    // KEY: Call play() synchronously here, inside the user click handler.
-    // This "unlocks" the audio element for the browser autoplay policy.
-    // Then we manage timing by pausing/seeking as needed.
-
-    // Calculate where the audio should be relative to the video's current time
+    // Calculate where the audio should be relative to video's current time
     var trackEnd = startTime + (trimEnd - trimStart);
-    // If video is already past this track's end, skip it
     if (videoStartTime >= trackEnd) {
       console.log("[Preview] Skipping track (past end):", track.filename);
       return;
     }
 
+    // KEY: Call play() synchronously to unlock audio for autoplay policy
     audio.play().then(function () {
       console.log("[Preview] Audio unlocked:", track.filename);
       if (videoStartTime >= startTime) {
-        // Video is already within this track's range — seek audio to the right offset
         var audioOffset = trimStart + (videoStartTime - startTime);
         audio.currentTime = Math.min(audioOffset, trimEnd);
-        audio.volume = interpVolume(audio.currentTime);
       } else {
-        // Track hasn't started yet — pause and schedule for later
         audio.pause();
         audio.currentTime = trimStart;
         var delayMs = (startTime - videoStartTime) * 1000;
@@ -304,11 +342,21 @@ window.startPreviewFromDOM = function () {
       console.warn("[Preview] Audio play error:", track.filename, err.message);
     });
   });
+
+  // Start real-time sync interval (polls preview-data every 150ms)
+  window._previewSyncInterval = setInterval(window._syncPreviewState, 150);
+  console.log("[Preview] Real-time sync started");
 };
 
 window.stopPreview = function () {
   console.log("[Preview] Stopping");
   window._previewActive = false;
+
+  // Stop real-time sync
+  if (window._previewSyncInterval) {
+    clearInterval(window._previewSyncInterval);
+    window._previewSyncInterval = null;
+  }
 
   window._previewTimers.forEach(function (t) { clearTimeout(t); });
   window._previewTimers = [];
@@ -329,4 +377,5 @@ window.stopPreview = function () {
     a.src = "";
   });
   window._audioElements = [];
+  window._audioTrackMap = {};
 };

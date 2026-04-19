@@ -281,12 +281,19 @@ def audio_track_item(track: dict) -> rx.Component:
                     ),
                     class_name="flex flex-col gap-1",
                 ),
-                # Volume Envelope (keyframes)
+                # Volume Automation (fade in/out over time)
                 rx.el.div(
                     rx.el.div(
-                        rx.el.label(
-                            "Volume Envelope",
-                            class_name="text-[10px] text-neutral-500 uppercase tracking-wider",
+                        rx.el.div(
+                            rx.el.label(
+                                "Volume Automation",
+                                class_name="text-[10px] text-neutral-500 uppercase tracking-wider",
+                            ),
+                            rx.el.p(
+                                "Set volume changes over time (left=time, right=level)",
+                                class_name="text-[9px] text-neutral-600 leading-tight",
+                            ),
+                            class_name="flex flex-col",
                         ),
                         rx.el.button(
                             rx.icon("plus", class_name="w-3 h-3 mr-0.5"),
