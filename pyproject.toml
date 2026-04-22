@@ -10,6 +10,7 @@ packages = [{include = "video_audio_mixer"}]
 python = "~3.11"
 reflex = "0.8.26"
 pydub = "*"
+yt-dlp = "*"
 audioop-lts = {version = "*", python = ">=3.13"}
 
 [tool.poetry.group.dev.dependencies]

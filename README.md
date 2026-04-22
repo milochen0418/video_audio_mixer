@@ -77,8 +77,9 @@ This will remove existing Poetry virtual environments and Reflex artifacts, recr
 - Once uploaded, the video preview and timeline will appear.
 
 ### 2. Add Audio Tracks
-- Click **+ Add Track** in the **Audio Tracks** panel on the right.
-- Drag and drop audio files (MP3, WAV, OGG, FLAC, AAC) to add them.
+- Click **+ Add Track** in the **Audio Tracks** panel on the right, then choose **From Computer** or **From YouTube**.
+- **From Computer** lets you upload local audio files (MP3, WAV, OGG, or M4A).
+- **From YouTube** lets you paste a URL and automatically converts the video to MP3 before adding it as a track.
 - Multiple audio tracks can be layered on top of the video.
 
 ### 3. Edit Audio Tracks

@@ -1,11 +1,15 @@
-import reflex as rx
-import subprocess
+import asyncio
 import json
+import logging
 import random
 import string
-import logging
+import subprocess
 import urllib.parse
+from pathlib import Path
 from typing import Any
+
+import reflex as rx
+import yt_dlp
 
 
 def get_media_duration(file_path: str) -> float:
@@ -46,6 +50,114 @@ def _interpolate_envelope(kfs: list, t: float) -> float:
     return 1.0
 
 
+def _sanitize_filename_component(value: str) -> str:
+    safe_value = "".join(c for c in value if c.isalnum() or c in (" ", "-", "_")).strip()
+    return safe_value or "youtube_audio"
+
+
+def _build_audio_track_entry(file_path: Path, display_name: str) -> dict[str, Any]:
+    duration = get_media_duration(str(file_path.absolute()))
+    track_id = f"trk_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
+    return {
+        "id": track_id,
+        "filename": display_name,
+        "path": file_path.name,
+        "volume": 1.0,
+        "start_time": 0.0,
+        "end_time": duration,
+        "duration": duration,
+        "muted": False,
+        "solo": False,
+        "volume_keyframes": [
+            {"time": 0.0, "volume": 1.0},
+        ],
+    }
+
+
+def _download_youtube_audio(url: str, upload_dir: Path) -> tuple[Path, str]:
+    """Download a YouTube URL as MP3 into the upload directory."""
+    base_opts = {
+        "format": "bestaudio/best",
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ],
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "logger": logging.getLogger(__name__),
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            )
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv", "android", "ios"],
+            }
+        },
+        "no_color": True,
+        "geo_bypass": True,
+        "extractor_retries": 3,
+        "fragment_retries": 3,
+        "retry_sleep_functions": {"http": lambda n: 0.5 * n},
+        "sleep_interval": 1,
+        "max_sleep_interval": 5,
+        "extract_flat": False,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+    }
+
+    with yt_dlp.YoutubeDL(base_opts) as ydl:
+        info_dict = ydl.extract_info(url, download=False)
+        video_title = info_dict.get("title", "youtube_audio")
+        safe_title = _sanitize_filename_component(video_title)
+        if safe_title == "youtube_audio":
+            safe_title = f"video_{info_dict.get('id', 'unknown')}"
+
+        download_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        output_prefix = f"yt_{download_id}_{safe_title}"
+        output_base = upload_dir / output_prefix
+
+        download_opts = {
+            **base_opts,
+            "outtmpl": {"default": str(output_base) + ".%(ext)s"},
+        }
+
+        with yt_dlp.YoutubeDL(download_opts) as download_ydl:
+            download_ydl.download([url])
+
+    final_path = output_base.with_suffix(".mp3")
+    if not final_path.exists():
+        candidates = sorted(upload_dir.glob(f"{output_prefix}*.mp3"))
+        if candidates:
+            final_path = candidates[0]
+
+    if not final_path.exists():
+        raise FileNotFoundError(f"Unable to locate the downloaded MP3 for {url}")
+
+    return final_path, f"{safe_title}.mp3"
+
+
+def _youtube_import_error_message(error: Exception) -> str:
+    error_str = str(error).lower()
+    if "sign in to confirm you're not a bot" in error_str or "authentication" in error_str:
+        return "This video needs authentication or is restricted. Please try another URL."
+    if "http error 403" in error_str or "unable to download video data" in error_str:
+        return "YouTube blocked the stream. Please try again later or choose a different video."
+    if "signature extraction failed" in error_str or "empty" in error_str:
+        return "Failed to extract the audio stream. Please try again later."
+    if "unavailable" in error_str or "private" in error_str:
+        return "This video is unavailable, private, or has been removed."
+    if "copyright" in error_str:
+        return "This video cannot be downloaded because of copyright restrictions."
+    return f"Unable to import audio from that URL: {error}"
+
+
 class MixerState(rx.State):
     video_file: str = ""
     video_filename: str = ""
@@ -55,6 +167,11 @@ class MixerState(rx.State):
     volume_segments: list[dict[str, float]] = []
     selected_track_id: str = ""
     is_uploading: bool = False
+    show_add_track_menu: bool = False
+    show_youtube_import_form: bool = False
+    youtube_import_url: str = ""
+    youtube_import_error: str = ""
+    is_youtube_importing: bool = False
     is_exporting: bool = False
     is_previewing: bool = False
     export_progress: float = 0.0
@@ -94,6 +211,9 @@ class MixerState(rx.State):
     @rx.event
     async def handle_audio_upload(self, files: list[rx.UploadFile]):
         self.is_uploading = True
+        self.show_add_track_menu = False
+        self.show_youtube_import_form = False
+        self.youtube_import_error = ""
         yield
         try:
             for file in files:
@@ -108,29 +228,78 @@ class MixerState(rx.State):
                 file_path = upload_dir / unique_name
                 with file_path.open("wb") as f:
                     f.write(upload_data)
-                full_path = str(file_path.absolute())
-                duration = get_media_duration(full_path)
-                track_id = f"trk_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
-                self.audio_tracks.append(
-                    {
-                        "id": track_id,
-                        "filename": file.filename,
-                        "path": unique_name,
-                        "volume": 1.0,
-                        "start_time": 0.0,
-                        "end_time": duration,
-                        "duration": duration,
-                        "muted": False,
-                        "solo": False,
-                        "volume_keyframes": [
-                            {"time": 0.0, "volume": 1.0},
-                        ],
-                    }
-                )
+                self.audio_tracks.append(_build_audio_track_entry(file_path, file.filename))
         except Exception as e:
             logging.exception(f"Error handling audio upload: {e}")
         finally:
             self.is_uploading = False
+
+    @rx.event
+    def toggle_add_track_menu(self):
+        if self.show_add_track_menu:
+            self.show_add_track_menu = False
+            self.show_youtube_import_form = False
+            self.youtube_import_error = ""
+        else:
+            self.show_add_track_menu = True
+            self.show_youtube_import_form = False
+            self.youtube_import_error = ""
+
+    @rx.event
+    def close_add_track_menu(self):
+        self.show_add_track_menu = False
+        self.show_youtube_import_form = False
+        self.youtube_import_error = ""
+
+    @rx.event
+    def open_youtube_import_form(self):
+        self.show_add_track_menu = True
+        self.show_youtube_import_form = True
+        self.youtube_import_error = ""
+
+    @rx.event
+    def back_to_add_track_choices(self):
+        self.show_youtube_import_form = False
+        self.youtube_import_error = ""
+
+    @rx.event
+    def set_youtube_import_url(self, url: str):
+        self.youtube_import_url = url
+        if self.youtube_import_error:
+            self.youtube_import_error = ""
+
+    @rx.event
+    async def handle_youtube_import(self):
+        youtube_url = self.youtube_import_url.strip()
+        if not youtube_url:
+            self.youtube_import_error = "Please paste a YouTube URL first."
+            yield
+            return
+
+        self.is_youtube_importing = True
+        self.youtube_import_error = ""
+        yield
+
+        try:
+            upload_dir = rx.get_upload_dir()
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            file_path, display_name = await asyncio.to_thread(
+                _download_youtube_audio,
+                youtube_url,
+                upload_dir,
+            )
+            self.audio_tracks.append(_build_audio_track_entry(file_path, display_name))
+            self.youtube_import_url = ""
+            self.show_add_track_menu = False
+            self.show_youtube_import_form = False
+        except yt_dlp.utils.DownloadError as e:
+            logging.exception(f"Error importing YouTube audio: {e}")
+            self.youtube_import_error = _youtube_import_error_message(e)
+        except Exception as e:
+            logging.exception(f"Unexpected error importing YouTube audio: {e}")
+            self.youtube_import_error = _youtube_import_error_message(e)
+        finally:
+            self.is_youtube_importing = False
 
     @rx.var
     def preview_data_json(self) -> str:
