@@ -2,6 +2,116 @@ import reflex as rx
 from video_audio_mixer.states.mixer_state import MixerState
 
 
+def _add_track_menu_choices() -> rx.Component:
+    return rx.el.div(
+        rx.el.p(
+            "Choose a source",
+            class_name="text-[11px] font-semibold uppercase tracking-wider text-neutral-500",
+        ),
+        rx.upload.root(
+            rx.el.button(
+                rx.icon("upload", class_name="w-4 h-4 shrink-0 text-neutral-300"),
+                rx.el.div(
+                    rx.el.span("From Computer", class_name="font-medium"),
+                    rx.el.span(
+                        "Upload a local audio file",
+                        class_name="text-[11px] text-neutral-500",
+                    ),
+                    class_name="flex flex-col items-start",
+                ),
+                class_name="w-full flex items-center gap-3 text-left text-sm text-neutral-200 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg px-3 py-3 transition-colors",
+            ),
+            id="audio_upload",
+            accept={"audio/*": [".mp3", ".wav", ".ogg", ".m4a"]},
+            multiple=True,
+            on_drop=MixerState.handle_audio_upload(
+                rx.upload_files(upload_id="audio_upload")
+            ),
+        ),
+        rx.el.button(
+            rx.icon("youtube", class_name="w-4 h-4 shrink-0 text-red-400"),
+            rx.el.div(
+                rx.el.span("From YouTube", class_name="font-medium"),
+                rx.el.span(
+                    "Paste a URL and convert to MP3",
+                    class_name="text-[11px] text-neutral-500",
+                ),
+                class_name="flex flex-col items-start",
+            ),
+            on_click=MixerState.open_youtube_import_form,
+            class_name="w-full flex items-center gap-3 text-left text-sm text-neutral-200 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg px-3 py-3 transition-colors",
+        ),
+        class_name="flex flex-col gap-2 pt-6",
+    )
+
+
+def _youtube_import_form() -> rx.Component:
+    return rx.el.div(
+        rx.el.div(
+            rx.el.h3(
+                "Import from YouTube",
+                class_name="text-sm font-semibold text-neutral-200",
+            ),
+            rx.el.p(
+                "Paste a YouTube link and it will be converted to an MP3 track.",
+                class_name="mt-1 text-[11px] text-neutral-500",
+            ),
+            class_name="pr-8",
+        ),
+        rx.el.input(
+            placeholder="https://www.youtube.com/watch?v=...",
+            value=MixerState.youtube_import_url,
+            on_change=MixerState.set_youtube_import_url,
+            class_name="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-indigo-500 focus:outline-none",
+        ),
+        rx.el.div(
+            rx.el.button(
+                "Back",
+                on_click=MixerState.back_to_add_track_choices,
+                disabled=MixerState.is_youtube_importing,
+                class_name="flex-1 rounded-md border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-300 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50",
+            ),
+            rx.el.button(
+                rx.cond(
+                    MixerState.is_youtube_importing,
+                    "Importing...",
+                    "Import MP3",
+                ),
+                on_click=MixerState.handle_youtube_import,
+                disabled=MixerState.is_youtube_importing,
+                class_name="flex-1 rounded-md bg-indigo-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50",
+            ),
+            class_name="flex gap-2",
+        ),
+        rx.cond(
+            MixerState.youtube_import_error != "",
+            rx.el.p(
+                MixerState.youtube_import_error,
+                class_name="text-xs leading-relaxed text-red-400",
+            ),
+            None,
+        ),
+        class_name="flex flex-col gap-3 pt-6",
+    )
+
+
+def _add_track_menu() -> rx.Component:
+    return rx.el.div(
+        rx.el.button(
+            rx.icon("x", class_name="w-3.5 h-3.5"),
+            on_click=MixerState.close_add_track_menu,
+            disabled=MixerState.is_youtube_importing,
+            class_name="absolute right-2 top-2 rounded-full p-1 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-40",
+        ),
+        rx.cond(
+            MixerState.show_youtube_import_form,
+            _youtube_import_form(),
+            _add_track_menu_choices(),
+        ),
+        class_name="absolute right-0 top-full z-30 mt-2 w-80 overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 p-3 shadow-2xl shadow-black/40",
+    )
+
+
 def video_panel() -> rx.Component:
     return rx.el.div(
         rx.el.h2(
@@ -365,20 +475,25 @@ def audio_panel() -> rx.Component:
                 "Audio Tracks",
                 class_name="text-sm font-semibold text-neutral-400 uppercase tracking-wider",
             ),
-            rx.upload.root(
+            rx.el.div(
                 rx.el.button(
                     rx.icon("plus", class_name="w-4 h-4 mr-1"),
                     "Add Track",
+                    rx.icon(
+                        "chevron-down",
+                        class_name=rx.cond(
+                            MixerState.show_add_track_menu,
+                            "w-3 h-3 ml-1 rotate-180 transition-transform",
+                            "w-3 h-3 ml-1 transition-transform",
+                        ),
+                    ),
+                    on_click=MixerState.toggle_add_track_menu,
                     class_name="flex items-center text-xs font-medium text-neutral-300 bg-neutral-800 hover:bg-neutral-700 px-3 py-1.5 rounded border border-neutral-700 transition-colors",
                 ),
-                id="audio_upload",
-                accept={"audio/*": [".mp3", ".wav", ".ogg", ".m4a"]},
-                multiple=True,
-                on_drop=MixerState.handle_audio_upload(
-                    rx.upload_files(upload_id="audio_upload")
-                ),
+                rx.cond(MixerState.show_add_track_menu, _add_track_menu(), None),
+                class_name="relative",
             ),
-            class_name="flex justify-between items-center mb-4",
+            class_name="flex items-start justify-between gap-3 mb-4",
         ),
         rx.cond(
             MixerState.audio_tracks.length() > 0,
@@ -395,5 +510,5 @@ def audio_panel() -> rx.Component:
                 class_name="flex flex-col items-center justify-center py-12 border border-dashed border-neutral-800 rounded-lg bg-neutral-900/50",
             ),
         ),
-        class_name="w-full lg:w-80 shrink-0 bg-neutral-900 rounded-xl p-5 border border-neutral-800 shadow-lg flex flex-col",
+        class_name="w-full lg:w-80 shrink-0 bg-neutral-900 rounded-xl p-5 border border-neutral-800 shadow-lg flex flex-col relative",
     )
