@@ -94,7 +94,7 @@ def _youtube_import_form() -> rx.Component:
                     ),
                     rx.el.p(
                         MixerState.youtube_import_status,
-                        class_name="text-[11px] text-neutral-400 truncate",
+                        class_name="text-[11px] text-neutral-400 whitespace-normal break-words",
                     ),
                     class_name="min-w-0 flex-1",
                 ),
@@ -128,6 +128,52 @@ def _add_track_menu() -> rx.Component:
             _add_track_menu_choices(),
         ),
         class_name="absolute right-0 top-full z-30 mt-2 w-80 overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 p-3 shadow-2xl shadow-black/40",
+    )
+
+
+def _youtube_import_notice() -> rx.Component:
+    return rx.el.div(
+        rx.el.div(
+            rx.el.div(
+                rx.el.p(
+                    "YouTube import",
+                    class_name="text-[10px] font-semibold uppercase tracking-wider text-neutral-500",
+                ),
+                rx.el.p(
+                    MixerState.youtube_import_status,
+                    class_name="mt-0.5 text-sm font-medium text-neutral-100 whitespace-normal break-words",
+                ),
+                class_name="min-w-0 flex-1",
+            ),
+            rx.el.button(
+                rx.icon("x", class_name="w-3.5 h-3.5"),
+                on_click=MixerState.dismiss_youtube_import_notice,
+                class_name="rounded p-1 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-200",
+            ),
+            class_name="flex items-start justify-between gap-3",
+        ),
+        rx.el.div(
+            rx.el.button(
+                rx.cond(
+                    MixerState.youtube_import_notice_expanded,
+                    "Hide full details",
+                    "Show full details",
+                ),
+                on_click=MixerState.toggle_youtube_import_notice_details,
+                disabled=MixerState.youtube_import_detail == "",
+                class_name="inline-flex items-center rounded-md border border-neutral-700 bg-neutral-950 px-2.5 py-1 text-[11px] font-medium text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50",
+            ),
+            class_name="mt-3 flex justify-end",
+        ),
+        rx.cond(
+            MixerState.youtube_import_notice_expanded,
+            rx.el.pre(
+                MixerState.youtube_import_detail,
+                class_name="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-neutral-700 bg-neutral-950/80 p-3 text-[11px] leading-relaxed text-neutral-300",
+            ),
+            rx.fragment(),
+        ),
+        class_name="rounded-xl border border-neutral-700 bg-neutral-900/90 p-3 shadow-inner shadow-black/20",
     )
 
 
@@ -514,6 +560,11 @@ def audio_panel() -> rx.Component:
             ),
             class_name="flex items-start justify-between gap-3 mb-4",
         ),
+            rx.cond(
+                MixerState.youtube_import_notice_visible,
+                _youtube_import_notice(),
+                rx.fragment(),
+            ),
         rx.cond(
             MixerState.audio_tracks.length() > 0,
             rx.el.div(

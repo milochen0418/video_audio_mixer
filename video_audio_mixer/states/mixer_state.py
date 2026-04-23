@@ -196,6 +196,10 @@ class MixerState(rx.State):
     show_youtube_import_form: bool = False
     youtube_import_url: str = ""
     youtube_import_error: str = ""
+    youtube_import_detail: str = ""
+    youtube_import_notice_visible: bool = False
+    youtube_import_notice_expanded: bool = False
+    youtube_import_notice_kind: str = "info"
     youtube_import_status: str = ""
     is_youtube_importing: bool = False
     is_exporting: bool = False
@@ -300,17 +304,47 @@ class MixerState(rx.State):
         if self.youtube_import_error:
             self.youtube_import_error = ""
 
+    def _set_youtube_import_notice(self, kind: str, summary: str, detail: str, error: str = ""):
+        self.youtube_import_notice_kind = kind
+        self.youtube_import_status = summary
+        self.youtube_import_detail = detail
+        self.youtube_import_error = error
+        self.youtube_import_notice_visible = True
+
+    @rx.event
+    def dismiss_youtube_import_notice(self):
+        self.youtube_import_notice_visible = False
+        self.youtube_import_notice_expanded = False
+        self.youtube_import_notice_kind = "info"
+        self.youtube_import_status = ""
+        self.youtube_import_detail = ""
+        self.youtube_import_error = ""
+
+    @rx.event
+    def toggle_youtube_import_notice_details(self):
+        self.youtube_import_notice_expanded = not self.youtube_import_notice_expanded
+
     @rx.event
     async def handle_youtube_import(self):
         youtube_url = self.youtube_import_url.strip()
         if not youtube_url:
-            self.youtube_import_error = "Please paste a YouTube URL first."
+            self._set_youtube_import_notice(
+                "error",
+                "YouTube import failed",
+                "Please paste a YouTube URL first.\n\nThe importer needs a valid YouTube URL before it can begin.",
+                "Please paste a YouTube URL first.",
+            )
+            self.youtube_import_notice_expanded = True
             yield
             return
 
         self.is_youtube_importing = True
-        self.youtube_import_error = ""
-        self.youtube_import_status = "Checking the YouTube link..."
+        self.youtube_import_notice_expanded = False
+        self._set_youtube_import_notice(
+            "loading",
+            "Checking the YouTube link...",
+            f"URL:\n{youtube_url}\n\nResolving metadata before downloading audio.",
+        )
         yield
 
         try:
@@ -318,7 +352,16 @@ class MixerState(rx.State):
                 _extract_youtube_audio_metadata,
                 youtube_url,
             )
-            self.youtube_import_status = f"Downloading audio from {video_title}..."
+            self._set_youtube_import_notice(
+                "loading",
+                f"Downloading audio from {video_title}...",
+                (
+                    f"URL:\n{youtube_url}\n\n"
+                    f"Title: {video_title}\n"
+                    f"Video ID: {video_id}\n\n"
+                    "Downloading MP3 into the upload directory."
+                ),
+            )
             yield
 
             upload_dir = rx.get_upload_dir()
@@ -334,17 +377,41 @@ class MixerState(rx.State):
             self.youtube_import_url = ""
             self.show_add_track_menu = False
             self.show_youtube_import_form = False
-            self.youtube_import_status = ""
-            yield rx.toast.success(f"Imported {display_name}", duration=4000)
+            self._set_youtube_import_notice(
+                "success",
+                "YouTube import complete",
+                f"Imported {display_name}",
+                (
+                    f"Source title: {video_title}\n"
+                    f"Video ID: {video_id}\n"
+                    f"Saved file: {display_name}\n\n"
+                    "A new audio track was added to the track list."
+                ),
+            )
+            yield rx.toast.success("YouTube import complete.", duration=4000)
         except yt_dlp.utils.DownloadError as e:
             logging.exception(f"Error importing YouTube audio: {e}")
-            self.youtube_import_error = _youtube_import_error_message(e)
-            self.youtube_import_status = ""
+            friendly_error = _youtube_import_error_message(e)
+            self._set_youtube_import_notice(
+                "error",
+                "YouTube import failed",
+                friendly_error,
+                f"{friendly_error}\n\nRaw error:\n{e}",
+                friendly_error,
+            )
+            self.youtube_import_notice_expanded = True
             yield rx.toast.error("YouTube import failed.", duration=5000)
         except Exception as e:
             logging.exception(f"Unexpected error importing YouTube audio: {e}")
-            self.youtube_import_error = _youtube_import_error_message(e)
-            self.youtube_import_status = ""
+            friendly_error = _youtube_import_error_message(e)
+            self._set_youtube_import_notice(
+                "error",
+                "YouTube import failed",
+                friendly_error,
+                f"{friendly_error}\n\nRaw error:\n{e}",
+                friendly_error,
+            )
+            self.youtube_import_notice_expanded = True
             yield rx.toast.error("YouTube import failed.", duration=5000)
         finally:
             self.is_youtube_importing = False
