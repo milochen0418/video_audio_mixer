@@ -6,7 +6,7 @@ import string
 import subprocess
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import reflex as rx
 import yt_dlp
@@ -137,6 +137,7 @@ def _download_youtube_audio(
     upload_dir: Path,
     video_title: str,
     video_id: str,
+    progress_hook: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[Path, str]:
     """Download a YouTube URL as MP3 into the upload directory."""
     base_opts = _build_youtube_ydl_options()
@@ -152,6 +153,8 @@ def _download_youtube_audio(
         **base_opts,
         "outtmpl": {"default": str(output_base) + ".%(ext)s"},
     }
+    if progress_hook is not None:
+        download_opts["progress_hooks"] = [progress_hook]
 
     with yt_dlp.YoutubeDL(download_opts) as download_ydl:
         download_ydl.download([url])
@@ -201,6 +204,8 @@ class MixerState(rx.State):
     youtube_import_notice_expanded: bool = False
     youtube_import_notice_kind: str = "info"
     youtube_import_status: str = ""
+    youtube_import_progress: float = 0.0
+    youtube_import_progress_text: str = "0.00%"
     is_youtube_importing: bool = False
     is_exporting: bool = False
     is_previewing: bool = False
@@ -272,11 +277,13 @@ class MixerState(rx.State):
             self.show_youtube_import_form = False
             self.youtube_import_error = ""
             self.youtube_import_status = ""
+            self.youtube_import_progress = 0.0
         else:
             self.show_add_track_menu = True
             self.show_youtube_import_form = False
             self.youtube_import_error = ""
             self.youtube_import_status = ""
+            self.youtube_import_progress = 0.0
 
     @rx.event
     def close_add_track_menu(self):
@@ -284,6 +291,7 @@ class MixerState(rx.State):
         self.show_youtube_import_form = False
         self.youtube_import_error = ""
         self.youtube_import_status = ""
+        self.youtube_import_progress = 0.0
 
     @rx.event
     def open_youtube_import_form(self):
@@ -291,12 +299,14 @@ class MixerState(rx.State):
         self.show_youtube_import_form = True
         self.youtube_import_error = ""
         self.youtube_import_status = ""
+        self.youtube_import_progress = 0.0
 
     @rx.event
     def back_to_add_track_choices(self):
         self.show_youtube_import_form = False
         self.youtube_import_error = ""
         self.youtube_import_status = ""
+        self.youtube_import_progress = 0.0
 
     @rx.event
     def set_youtube_import_url(self, url: str):
@@ -304,12 +314,25 @@ class MixerState(rx.State):
         if self.youtube_import_error:
             self.youtube_import_error = ""
 
-    def _set_youtube_import_notice(self, kind: str, summary: str, detail: str, error: str = ""):
+    def _set_youtube_import_notice(
+        self,
+        kind: str,
+        summary: str,
+        detail: str,
+        error: str = "",
+        progress: float | None = None,
+    ):
         self.youtube_import_notice_kind = kind
         self.youtube_import_status = summary
         self.youtube_import_detail = detail
         self.youtube_import_error = error
         self.youtube_import_notice_visible = True
+        if progress is not None:
+            self._set_youtube_import_progress(progress)
+
+    def _set_youtube_import_progress(self, progress: float):
+        self.youtube_import_progress = progress
+        self.youtube_import_progress_text = f"{progress:.2f}%"
 
     @rx.event
     def dismiss_youtube_import_notice(self):
@@ -319,6 +342,7 @@ class MixerState(rx.State):
         self.youtube_import_status = ""
         self.youtube_import_detail = ""
         self.youtube_import_error = ""
+        self.youtube_import_progress = 0.0
 
     @rx.event
     def toggle_youtube_import_notice_details(self):
@@ -335,15 +359,18 @@ class MixerState(rx.State):
                 "Please paste a YouTube URL first.",
             )
             self.youtube_import_notice_expanded = True
+            self._set_youtube_import_progress(0.0)
             yield
             return
 
         self.is_youtube_importing = True
         self.youtube_import_notice_expanded = False
+        self._set_youtube_import_progress(0.0)
         self._set_youtube_import_notice(
             "loading",
             "Checking the YouTube link...",
             f"URL:\n{youtube_url}\n\nResolving metadata before downloading audio.",
+            progress=0.0,
         )
         yield
 
@@ -361,18 +388,76 @@ class MixerState(rx.State):
                     f"Video ID: {video_id}\n\n"
                     "Downloading MP3 into the upload directory."
                 ),
+                progress=0.0,
             )
             yield
 
             upload_dir = rx.get_upload_dir()
             upload_dir.mkdir(parents=True, exist_ok=True)
-            file_path, display_name = await asyncio.to_thread(
-                _download_youtube_audio,
-                youtube_url,
-                upload_dir,
-                video_title,
-                video_id,
+            download_snapshot: dict[str, Any] = {
+                "progress": 0.0,
+                "detail": "Preparing download...",
+            }
+
+            def _download_progress_hook(progress_data: dict[str, Any]) -> None:
+                status = progress_data.get("status")
+                if status == "finished":
+                    download_snapshot["progress"] = 99.0
+                    download_snapshot["detail"] = (
+                        "Download complete. Converting the video to MP3..."
+                    )
+                    return
+                if status != "downloading":
+                    return
+                downloaded_bytes = float(progress_data.get("downloaded_bytes") or 0.0)
+                total_bytes = float(
+                    progress_data.get("total_bytes")
+                    or progress_data.get("total_bytes_estimate")
+                    or 0.0
+                )
+                progress = 0.0
+                if total_bytes > 0:
+                    progress = min(99.0, max(0.0, downloaded_bytes / total_bytes * 100.0))
+                detail = f"Progress: {progress:.2f}%"
+                eta = progress_data.get("eta")
+                if eta is not None:
+                    detail += f" • ETA {int(eta)}s"
+                download_snapshot["progress"] = progress
+                download_snapshot["detail"] = detail
+
+            download_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _download_youtube_audio,
+                    youtube_url,
+                    upload_dir,
+                    video_title,
+                    video_id,
+                    _download_progress_hook,
+                )
             )
+            last_rendered_progress = -1
+            while not download_task.done():
+                current_progress = float(download_snapshot["progress"])
+                current_rendered_progress = int(current_progress)
+                if current_rendered_progress != last_rendered_progress:
+                    self._set_youtube_import_notice(
+                        "loading",
+                        f"Downloading audio from {video_title}...",
+                        (
+                            f"URL:\n{youtube_url}\n\n"
+                            f"Title: {video_title}\n"
+                            f"Video ID: {video_id}\n\n"
+                            f"{download_snapshot['detail']}\n\n"
+                            "Downloading MP3 into the upload directory."
+                        ),
+                        progress=current_progress,
+                    )
+                    last_rendered_progress = current_rendered_progress
+                    yield
+                await asyncio.sleep(0.2)
+
+            file_path, display_name = await download_task
+            self._set_youtube_import_progress(100.0)
             self.audio_tracks.append(_build_audio_track_entry(file_path, display_name))
             self.youtube_import_url = ""
             self.show_add_track_menu = False
@@ -387,6 +472,7 @@ class MixerState(rx.State):
                     f"Saved file: {display_name}\n\n"
                     "A new audio track was added to the track list."
                 ),
+                progress=100.0,
             )
             yield rx.toast.success("YouTube import complete.", duration=4000)
         except yt_dlp.utils.DownloadError as e:
@@ -398,6 +484,7 @@ class MixerState(rx.State):
                 friendly_error,
                 f"{friendly_error}\n\nRaw error:\n{e}",
                 friendly_error,
+                progress=0.0,
             )
             self.youtube_import_notice_expanded = True
             yield rx.toast.error("YouTube import failed.", duration=5000)
@@ -410,6 +497,7 @@ class MixerState(rx.State):
                 friendly_error,
                 f"{friendly_error}\n\nRaw error:\n{e}",
                 friendly_error,
+                progress=0.0,
             )
             self.youtube_import_notice_expanded = True
             yield rx.toast.error("YouTube import failed.", duration=5000)

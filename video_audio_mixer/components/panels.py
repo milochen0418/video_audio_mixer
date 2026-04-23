@@ -96,6 +96,7 @@ def _youtube_import_form() -> rx.Component:
                         MixerState.youtube_import_status,
                         class_name="text-[11px] text-neutral-400 whitespace-normal break-words",
                     ),
+                    _youtube_import_progress_meter(),
                     class_name="min-w-0 flex-1",
                 ),
                 class_name="flex items-start gap-3 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2",
@@ -111,6 +112,30 @@ def _youtube_import_form() -> rx.Component:
             None,
         ),
         class_name="flex flex-col gap-3 pt-6",
+    )
+
+
+def _youtube_import_progress_meter() -> rx.Component:
+    return rx.el.div(
+        rx.el.div(
+            rx.el.div(
+                class_name="h-full rounded-full bg-indigo-400 transition-all duration-200",
+                style={"width": MixerState.youtube_import_progress.to(str) + "%"},
+            ),
+            class_name="h-2 overflow-hidden rounded-full bg-neutral-800",
+        ),
+        rx.el.div(
+            rx.el.span(
+                "Progress",
+                class_name="text-[10px] uppercase tracking-wider text-neutral-500",
+            ),
+            rx.el.span(
+                MixerState.youtube_import_progress_text,
+                class_name="text-[11px] font-medium text-indigo-200 tabular-nums",
+            ),
+            class_name="mt-1 flex items-center justify-between",
+        ),
+        class_name="mt-3",
     )
 
 
@@ -152,6 +177,11 @@ def _youtube_import_notice() -> rx.Component:
             ),
             class_name="flex items-start justify-between gap-3",
         ),
+            rx.cond(
+                MixerState.youtube_import_notice_kind == "loading",
+                _youtube_import_progress_meter(),
+                rx.fragment(),
+            ),
         rx.el.div(
             rx.el.button(
                 rx.cond(
@@ -560,11 +590,11 @@ def audio_panel() -> rx.Component:
             ),
             class_name="flex items-start justify-between gap-3 mb-4",
         ),
-            rx.cond(
-                MixerState.youtube_import_notice_visible,
-                _youtube_import_notice(),
-                rx.fragment(),
-            ),
+        rx.cond(
+            MixerState.youtube_import_notice_visible,
+            _youtube_import_notice(),
+            rx.fragment(),
+        ),
         rx.cond(
             MixerState.audio_tracks.length() > 0,
             rx.el.div(
