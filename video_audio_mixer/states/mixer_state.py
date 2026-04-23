@@ -12,6 +12,20 @@ import reflex as rx
 import yt_dlp
 
 
+class _QuietYtDlpLogger:
+    def debug(self, msg):
+        return
+
+    def info(self, msg):
+        return
+
+    def warning(self, msg):
+        return
+
+    def error(self, msg):
+        logging.error(msg)
+
+
 def get_media_duration(file_path: str) -> float:
     """Extract media duration using ffprobe."""
     try:
@@ -74,9 +88,8 @@ def _build_audio_track_entry(file_path: Path, display_name: str) -> dict[str, An
     }
 
 
-def _download_youtube_audio(url: str, upload_dir: Path) -> tuple[Path, str]:
-    """Download a YouTube URL as MP3 into the upload directory."""
-    base_opts = {
+def _build_youtube_ydl_options() -> dict[str, Any]:
+    return {
         "format": "bestaudio/best",
         "postprocessors": [
             {
@@ -88,7 +101,7 @@ def _download_youtube_audio(url: str, upload_dir: Path) -> tuple[Path, str]:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "logger": logging.getLogger(__name__),
+        "logger": _QuietYtDlpLogger(),
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -100,6 +113,7 @@ def _download_youtube_audio(url: str, upload_dir: Path) -> tuple[Path, str]:
                 "player_client": ["tv", "android", "ios"],
             }
         },
+        "remote_components": ["ejs:github"],
         "no_color": True,
         "geo_bypass": True,
         "extractor_retries": 3,
@@ -111,25 +125,36 @@ def _download_youtube_audio(url: str, upload_dir: Path) -> tuple[Path, str]:
         "writesubtitles": False,
         "writeautomaticsub": False,
     }
-
-    with yt_dlp.YoutubeDL(base_opts) as ydl:
+def _extract_youtube_audio_metadata(url: str) -> tuple[str, str]:
+    """Extract a YouTube title and video id without downloading media."""
+    with yt_dlp.YoutubeDL(_build_youtube_ydl_options()) as ydl:
         info_dict = ydl.extract_info(url, download=False)
-        video_title = info_dict.get("title", "youtube_audio")
-        safe_title = _sanitize_filename_component(video_title)
-        if safe_title == "youtube_audio":
-            safe_title = f"video_{info_dict.get('id', 'unknown')}"
+    return info_dict.get("title", "youtube_audio"), info_dict.get("id", "unknown")
 
-        download_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        output_prefix = f"yt_{download_id}_{safe_title}"
-        output_base = upload_dir / output_prefix
 
-        download_opts = {
-            **base_opts,
-            "outtmpl": {"default": str(output_base) + ".%(ext)s"},
-        }
+def _download_youtube_audio(
+    url: str,
+    upload_dir: Path,
+    video_title: str,
+    video_id: str,
+) -> tuple[Path, str]:
+    """Download a YouTube URL as MP3 into the upload directory."""
+    base_opts = _build_youtube_ydl_options()
+    safe_title = _sanitize_filename_component(video_title)
+    if safe_title == "youtube_audio":
+        safe_title = f"video_{video_id}"
 
-        with yt_dlp.YoutubeDL(download_opts) as download_ydl:
-            download_ydl.download([url])
+    download_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    output_prefix = f"yt_{download_id}_{safe_title}"
+    output_base = upload_dir / output_prefix
+
+    download_opts = {
+        **base_opts,
+        "outtmpl": {"default": str(output_base) + ".%(ext)s"},
+    }
+
+    with yt_dlp.YoutubeDL(download_opts) as download_ydl:
+        download_ydl.download([url])
 
     final_path = output_base.with_suffix(".mp3")
     if not final_path.exists():
@@ -171,6 +196,7 @@ class MixerState(rx.State):
     show_youtube_import_form: bool = False
     youtube_import_url: str = ""
     youtube_import_error: str = ""
+    youtube_import_status: str = ""
     is_youtube_importing: bool = False
     is_exporting: bool = False
     is_previewing: bool = False
@@ -214,6 +240,7 @@ class MixerState(rx.State):
         self.show_add_track_menu = False
         self.show_youtube_import_form = False
         self.youtube_import_error = ""
+        self.youtube_import_status = ""
         yield
         try:
             for file in files:
@@ -240,27 +267,32 @@ class MixerState(rx.State):
             self.show_add_track_menu = False
             self.show_youtube_import_form = False
             self.youtube_import_error = ""
+            self.youtube_import_status = ""
         else:
             self.show_add_track_menu = True
             self.show_youtube_import_form = False
             self.youtube_import_error = ""
+            self.youtube_import_status = ""
 
     @rx.event
     def close_add_track_menu(self):
         self.show_add_track_menu = False
         self.show_youtube_import_form = False
         self.youtube_import_error = ""
+        self.youtube_import_status = ""
 
     @rx.event
     def open_youtube_import_form(self):
         self.show_add_track_menu = True
         self.show_youtube_import_form = True
         self.youtube_import_error = ""
+        self.youtube_import_status = ""
 
     @rx.event
     def back_to_add_track_choices(self):
         self.show_youtube_import_form = False
         self.youtube_import_error = ""
+        self.youtube_import_status = ""
 
     @rx.event
     def set_youtube_import_url(self, url: str):
@@ -278,26 +310,42 @@ class MixerState(rx.State):
 
         self.is_youtube_importing = True
         self.youtube_import_error = ""
+        self.youtube_import_status = "Checking the YouTube link..."
         yield
 
         try:
+            video_title, video_id = await asyncio.to_thread(
+                _extract_youtube_audio_metadata,
+                youtube_url,
+            )
+            self.youtube_import_status = f"Downloading audio from {video_title}..."
+            yield
+
             upload_dir = rx.get_upload_dir()
             upload_dir.mkdir(parents=True, exist_ok=True)
             file_path, display_name = await asyncio.to_thread(
                 _download_youtube_audio,
                 youtube_url,
                 upload_dir,
+                video_title,
+                video_id,
             )
             self.audio_tracks.append(_build_audio_track_entry(file_path, display_name))
             self.youtube_import_url = ""
             self.show_add_track_menu = False
             self.show_youtube_import_form = False
+            self.youtube_import_status = ""
+            yield rx.toast.success(f"Imported {display_name}", duration=4000)
         except yt_dlp.utils.DownloadError as e:
             logging.exception(f"Error importing YouTube audio: {e}")
             self.youtube_import_error = _youtube_import_error_message(e)
+            self.youtube_import_status = ""
+            yield rx.toast.error("YouTube import failed.", duration=5000)
         except Exception as e:
             logging.exception(f"Unexpected error importing YouTube audio: {e}")
             self.youtube_import_error = _youtube_import_error_message(e)
+            self.youtube_import_status = ""
+            yield rx.toast.error("YouTube import failed.", duration=5000)
         finally:
             self.is_youtube_importing = False
 
