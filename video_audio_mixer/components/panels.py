@@ -84,6 +84,25 @@ def _youtube_import_form() -> rx.Component:
             class_name="flex gap-2",
         ),
         rx.cond(
+            MixerState.is_youtube_importing,
+            rx.el.div(
+                rx.el.div(class_name="h-2 w-2 rounded-full bg-indigo-400 animate-pulse"),
+                rx.el.div(
+                    rx.el.p(
+                        "Importing from YouTube",
+                        class_name="text-xs font-medium text-indigo-200",
+                    ),
+                    rx.el.p(
+                        MixerState.youtube_import_status,
+                        class_name="text-[11px] text-neutral-400 truncate",
+                    ),
+                    class_name="min-w-0 flex-1",
+                ),
+                class_name="flex items-start gap-3 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2",
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
             MixerState.youtube_import_error != "",
             rx.el.p(
                 MixerState.youtube_import_error,
