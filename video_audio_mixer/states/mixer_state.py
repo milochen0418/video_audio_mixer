@@ -795,6 +795,23 @@ class MixerState(rx.State):
             from pathlib import Path
 
             upload_dir = rx.get_upload_dir()
+            # Probe video to check if it has an audio stream
+            probe_proc = await asyncio.create_subprocess_exec(
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                str(upload_dir / self.video_file),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            probe_out, _ = await probe_proc.communicate()
+            video_has_audio = bool(probe_out.strip())
             async with self:
                 video_path = upload_dir / self.video_file
                 out_filename = f"exported_{self.video_file}"
@@ -820,12 +837,17 @@ class MixerState(rx.State):
                         vol_filters.append(
                             f"volume={vol}:enable='between(t,{start},{end})'"
                         )
-                if vol_filters:
+                if not video_has_audio:
+                    # Source video has no audio track; skip [0:a] references
+                    audio_labels = []
+                    video_audio_label = ""
+                elif vol_filters:
                     filter_complex.append(f"[0:a]{','.join(vol_filters)}[v_audio];")
                     video_audio_label = "[v_audio]"
+                    audio_labels = [video_audio_label]
                 else:
                     video_audio_label = "[0:a]"
-                audio_labels = [video_audio_label]
+                    audio_labels = [video_audio_label]
                 for i, t in enumerate(active_tracks):
                     idx = i + 1
                     trim_start = t.get("trim_start", 0.0)
@@ -888,31 +910,45 @@ class MixerState(rx.State):
                         + f"amix=inputs={len(audio_labels)}:duration=first:dropout_transition=2[a_out]"
                     )
                     filter_complex.append(mix_filter)
-                    map_audio = ("-map", "[a_out]")
+                    audio_map_arg = "[a_out]"
+                elif audio_labels:
+                    # Single audio source (could be [0:a], [v_audio], or an external [a_N]).
+                    audio_map_arg = audio_labels[0]
                 else:
-                    map_audio = ("-map", video_audio_label.strip("[]"))
+                    audio_map_arg = None
                 cmd = ["ffmpeg", "-y", *inputs]
                 if filter_complex:
                     cmd.extend(["-filter_complex", "".join(filter_complex)])
                     cmd.extend(["-map", "0:v"])
-                    if len(audio_labels) > 1:
-                        cmd.extend(["-map", "[a_out]"])
-                    else:
-                        cmd.extend(["-map", "0:a"])
+                    if audio_map_arg:
+                        cmd.extend(["-map", audio_map_arg])
+                    cmd.extend(
+                        ["-c:v", "copy"]
+                        + (["-c:a", "aac", "-b:a", "192k"] if audio_map_arg else [])
+                        + ["-shortest", str(out_path)]
+                    )
                 else:
-                    cmd.extend(["-c", "copy"])
-                cmd.extend(
-                    ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out_path)]
-                )
+                    cmd.extend(["-map", "0:v"])
+                    if audio_map_arg:
+                        cmd.extend(["-map", audio_map_arg])
+                    cmd.extend(
+                        ["-c:v", "copy"]
+                        + (["-c:a", "aac", "-b:a", "192k"] if audio_map_arg else [])
+                        + ["-shortest", str(out_path)]
+                    )
+            logging.info("FFmpeg export command: %s", " ".join(cmd))
             process = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             time_regex = re.compile("time=(\\d+):(\\d+):(\\d+\\.\\d+)")
+            from collections import deque
+            stderr_tail: deque[str] = deque(maxlen=80)
             while True:
                 line = await process.stderr.readline()
                 if not line:
                     break
                 line_str = line.decode("utf-8", errors="replace")
+                stderr_tail.append(line_str.rstrip())
                 match = time_regex.search(line_str)
                 if match:
                     async with self:
@@ -932,10 +968,41 @@ class MixerState(rx.State):
                     self.exported_file = out_filename
                     yield rx.toast("Export completed successfully!", duration=5000)
                 else:
+                    tail_text = "\n".join(stderr_tail)
+                    logging.error(
+                        "FFmpeg failed (exit %s). Command: %s\nStderr tail:\n%s",
+                        process.returncode,
+                        " ".join(cmd),
+                        tail_text,
+                    )
+                    # Try to surface the most informative line from stderr
+                    informative = ""
+                    for ln in reversed(stderr_tail):
+                        low = ln.lower()
+                        if any(
+                            kw in low
+                            for kw in (
+                                "error",
+                                "invalid",
+                                "no such",
+                                "does not contain",
+                                "could not",
+                                "failed",
+                                "unable",
+                                "permission",
+                            )
+                        ):
+                            informative = ln.strip()
+                            break
+                    if not informative and stderr_tail:
+                        informative = stderr_tail[-1].strip()
                     self.export_error = (
                         f"FFmpeg failed with exit code {process.returncode}"
+                        + (f": {informative}" if informative else "")
                     )
-                    yield rx.toast(f"Export failed: {self.export_error}", duration=5000)
+                    yield rx.toast(
+                        f"Export failed: {self.export_error}", duration=8000
+                    )
         except Exception as e:
             async with self:
                 self.export_error = str(e)
